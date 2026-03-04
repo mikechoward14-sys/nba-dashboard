@@ -96,7 +96,7 @@ def get_team_season_stats(season: str = "2024-25") -> pd.DataFrame:
         time.sleep(0.6)
         df = leaguedashteamstats.LeagueDashTeamStats(
             season=season,
-            per_mode_simple="PerGame",
+            per_mode_detailed="PerGame",
         ).get_data_frames()[0]
         return df
     return _cached(key, ttl_hours=12, fn=fetch)
@@ -107,8 +107,9 @@ def get_team_advanced_stats(season: str = "2024-25") -> pd.DataFrame:
         time.sleep(0.6)
         df = leaguedashteamstats.LeagueDashTeamStats(
             season=season,
-            measure_type_simple="Advanced",
-            per_mode_simple="PerGame",
+            measure_type_detailed_defense="Advanced",
+            per_mode_detailed="PerGame",
+            last_n_games=0,
         ).get_data_frames()[0]
         return df
     return _cached(key, ttl_hours=12, fn=fetch)
@@ -135,7 +136,7 @@ def get_player_season_stats(season: str = "2024-25", min_minutes: float = 20.0) 
         time.sleep(0.6)
         df = leaguedashplayerstats.LeagueDashPlayerStats(
             season=season,
-            per_mode_simple="PerGame",
+            per_mode_detailed="PerGame",
         ).get_data_frames()[0]
         return df
     df = _cached(key, ttl_hours=12, fn=fetch)
