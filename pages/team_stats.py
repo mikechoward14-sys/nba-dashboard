@@ -49,23 +49,24 @@ def render(season: str):
     if "TEAM_ID" in merged.columns:
         merged["ELO"] = merged["TEAM_ID"].map(elo_ratings).round(1)
 
-    # ── Filter / sort controls ────────────────────────────────────────────────
-    col_sort, col_dir = st.columns(2)
-    numeric_cols = merged.select_dtypes(include="number").columns.tolist()
-    default_sort = "ELO" if "ELO" in numeric_cols else numeric_cols[0] if numeric_cols else None
-
-    with col_sort:
-        sort_col = st.selectbox("Sort by", numeric_cols, index=numeric_cols.index(default_sort) if default_sort in numeric_cols else 0)
-    with col_dir:
-        ascending = st.radio("Order", ["Descending", "Ascending"], horizontal=True) == "Ascending"
-
-    # Display columns
+    # ── Display columns (defined first so sort dropdown matches) ─────────────
     display_cols = ["TEAM_NAME"]
     for c in ["W", "L", "WIN_PCT", "PTS", "OPP_PTS", "PLUS_MINUS", "OFF_RATING", "DEF_RATING", "NET_RATING", "PACE", "ELO"]:
         if c in merged.columns:
             display_cols.append(c)
 
-    display_df = merged[display_cols].sort_values(sort_col, ascending=ascending) if sort_col else merged[display_cols]
+    # ── Filter / sort controls ────────────────────────────────────────────────
+    col_sort, col_dir = st.columns(2)
+    numeric_cols = merged.select_dtypes(include="number").columns.tolist()
+    sortable_cols = [c for c in display_cols if c in numeric_cols]
+    default_sort = "ELO" if "ELO" in sortable_cols else sortable_cols[0] if sortable_cols else None
+    with col_sort:
+        sort_col = st.selectbox("Sort by", sortable_cols, index=sortable_cols.index(default_sort) if default_sort in sortable_cols else 0)
+    with col_dir:
+        ascending = st.radio("Order", ["Descending", "Ascending"], horizontal=True) == "Ascending"
+
+    sorted_merged = merged.sort_values(sort_col, ascending=ascending) if sort_col else merged
+    display_df = sorted_merged[display_cols]
     display_df = display_df.rename(columns={"TEAM_NAME": "Team"})
 
     st.dataframe(display_df, use_container_width=True, hide_index=True)
