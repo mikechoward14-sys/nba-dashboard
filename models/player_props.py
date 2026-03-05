@@ -1,16 +1,21 @@
 """
 Player prop line generator.
 
-For each player + stat category, we calculate:
-  1. Season average (weighted toward recent)
-  2. Last-N game rolling average
-  3. Matchup adjustment: how well has opponent defended this position?
-  4. Pace adjustment: fast/slow pace teams affect counting stats
+Key design: the model returns a projection + distribution (mean + std_dev).
+Over/under probabilities are always calculated against the BOOK'S line,
+not our projected line. This is what surfaces under bets correctly.
 
-Output: projected line, over prob, under prob
+If DraftKings has PTS at 27.5 and our projection is 23.0 with std 5.0:
+  P(over 27.5) = 1 - norm.cdf(27.5, 23, 5) ≈ 19% → lean Under
+  P(under 27.5) = norm.cdf(27.5, 23, 5) ≈ 81% → strong Under edge
+
+Calibration: the CALIBRATION_SCALE is a multiplier on std_dev derived from
+historical hit/miss data. Starts at 1.0, auto-adjusted by the tracker.
 """
+import json
 import pandas as pd
 import numpy as np
+from pathlib import Path
 from scipy import stats as scipy_stats
 
 PROP_CATEGORIES = {
@@ -24,9 +29,21 @@ PROP_CATEGORIES = {
 }
 
 RECENT_WINDOW = 10
-SEASON_WEIGHT = 0.4
-RECENT_WEIGHT = 0.6
-MATCHUP_ADJ_WEIGHT = 0.15
+SEASON_WEIGHT = 0.35
+RECENT_WEIGHT = 0.65
+MATCHUP_ADJ_WEIGHT = 0.20
+
+CALIBRATION_FILE = Path(__file__).parent.parent / ".tracking" / "calibration.json"
+
+
+def _load_calibration() -> dict:
+    """Load per-stat calibration scale factors from tracker. Default 1.0."""
+    if CALIBRATION_FILE.exists():
+        try:
+            return json.loads(CALIBRATION_FILE.read_text())
+        except Exception:
+            pass
+    return {}
 
 
 def _safe_series(game_log: pd.DataFrame, col: str) -> pd.Series:
@@ -35,25 +52,34 @@ def _safe_series(game_log: pd.DataFrame, col: str) -> pd.Series:
     return pd.to_numeric(game_log[col], errors="coerce").dropna()
 
 
+def prob_at_line(projection: float, std_dev: float, book_line: float, calibration_scale: float = 1.0) -> tuple[float, float]:
+    """
+    Given our projection + std_dev, calculate P(over book_line) and P(under book_line).
+    Uses a continuity correction of ±0.5 since NBA stats are integers.
+    calibration_scale adjusts std_dev based on historical accuracy.
+    """
+    adj_std = max(std_dev * calibration_scale, 0.1)
+    over_prob  = float(1 - scipy_stats.norm.cdf(book_line + 0.5, loc=projection, scale=adj_std))
+    under_prob = float(scipy_stats.norm.cdf(book_line - 0.5, loc=projection, scale=adj_std))
+    return round(max(0.01, min(0.99, over_prob)), 4), round(max(0.01, min(0.99, under_prob)), 4)
+
+
 def player_prop_line(
     player_game_log: pd.DataFrame,
     stat: str,
     opponent_stats: pd.Series | None = None,
     game_pace: float = 100.0,
     league_avg_pace: float = 100.0,
+    book_line: float | None = None,
 ) -> dict:
     """
-    Returns a dict with:
-      - line: the projected over/under line (rounded to nearest 0.5)
-      - projection: raw projected value
-      - over_prob: probability of going over the line
-      - under_prob: probability of going under the line
-      - season_avg: full season average
-      - recent_avg: last-10 average
-      - std_dev: standard deviation of recent performances
-      - hit_rate_over: % of last-20 games over line
-      - games_played: number of games in log
+    Returns projection dict. If book_line is provided, over/under probs are
+    calculated against that line. Otherwise they're calculated against our line.
+    Always returns both the over AND under direction accurately.
     """
+    calibration = _load_calibration()
+    cal_scale = calibration.get(stat, 1.0)
+
     series = _safe_series(player_game_log, stat)
     if series.empty:
         return _empty_result(stat)
@@ -61,56 +87,58 @@ def player_prop_line(
     season_avg = series.mean()
     recent = series.iloc[:RECENT_WINDOW] if len(series) >= RECENT_WINDOW else series
     recent_avg = recent.mean()
-    std_dev = series.std() if len(series) > 3 else recent_avg * 0.25
+
+    # Std dev: use full sample for stability, floor at 15% of mean
+    std_dev = series.std() if len(series) > 4 else recent_avg * 0.30
+    std_dev = max(std_dev, season_avg * 0.15)
 
     # Blended projection
     projection = SEASON_WEIGHT * season_avg + RECENT_WEIGHT * recent_avg
 
-    # Pace adjustment: faster pace → more possessions → more stats
-    pace_factor = game_pace / league_avg_pace
-    projection *= pace_factor
+    # Pace adjustment
+    if league_avg_pace > 0:
+        projection *= (game_pace / league_avg_pace)
 
-    # Matchup adjustment (optional)
+    # Matchup adjustment
     if opponent_stats is not None:
         opp_factor = _matchup_factor(stat, opponent_stats)
+        # Blend: 80% projection, 20% matchup-adjusted
         projection = projection * (1 - MATCHUP_ADJ_WEIGHT) + projection * opp_factor * MATCHUP_ADJ_WEIGHT
 
-    # Round to nearest 0.5
-    line = round(projection * 2) / 2
+    # Our fair line (rounded to nearest 0.5)
+    our_line = round(projection * 2) / 2
 
-    # Over/under probs using normal distribution
-    if std_dev > 0:
-        over_prob = float(1 - scipy_stats.norm.cdf(line + 0.5, loc=projection, scale=std_dev))
-        under_prob = float(scipy_stats.norm.cdf(line - 0.5, loc=projection, scale=std_dev))
-    else:
-        over_prob = 0.5
-        under_prob = 0.5
+    # Calculate probs against book line if available, else vs our line
+    target_line = book_line if book_line is not None else our_line
+    over_prob, under_prob = prob_at_line(projection, std_dev, target_line, cal_scale)
 
-    # Historical hit rate vs the line
-    hit_rate_over = float((series > line).mean()) if not series.empty else 0.5
+    # Historical hit rate vs our line (for chart reference)
+    hit_rate_over = float((series > our_line).mean()) if not series.empty else 0.5
+    # Historical hit rate vs book line
+    hit_rate_over_book = float((series > target_line).mean()) if book_line is not None else hit_rate_over
 
     return {
         "stat": stat,
         "stat_label": PROP_CATEGORIES.get(stat, stat),
-        "line": line,
+        "our_line": our_line,
+        "line": our_line,  # kept for backward compat
+        "book_line": book_line,
+        "target_line": target_line,
         "projection": round(projection, 2),
-        "over_prob": round(over_prob, 3),
-        "under_prob": round(under_prob, 3),
+        "std_dev": round(std_dev, 2),
+        "over_prob": over_prob,
+        "under_prob": under_prob,
         "season_avg": round(season_avg, 2),
         "recent_avg": round(recent_avg, 2),
-        "std_dev": round(std_dev, 2),
         "hit_rate_over": round(hit_rate_over, 3),
+        "hit_rate_over_book": round(hit_rate_over_book, 3),
         "games_played": len(series),
+        "calibration_scale": cal_scale,
     }
 
 
 def _matchup_factor(stat: str, opp_stats: pd.Series) -> float:
-    """
-    Returns a multiplier for the opponent's defensive impact on the stat.
-    > 1.0 means opponent gives up more of this stat (favorable matchup)
-    < 1.0 means opponent is stingy (unfavorable matchup)
-    """
-    # Map stat to relevant opponent defensive columns
+    """Multiplier based on opponent's defensive tendencies for this stat."""
     stat_to_opp = {
         "PTS": "OPP_PTS",
         "REB": "OPP_REB",
@@ -120,33 +148,21 @@ def _matchup_factor(stat: str, opp_stats: pd.Series) -> float:
     opp_col = stat_to_opp.get(stat)
     if opp_col is None or opp_col not in opp_stats.index:
         return 1.0
-
-    league_avg = {
-        "OPP_PTS": 112.0,
-        "OPP_REB": 43.5,
-        "OPP_AST": 25.0,
-        "OPP_FG3M": 13.5,
-    }
+    league_avg = {"OPP_PTS": 115.0, "OPP_REB": 43.5, "OPP_AST": 25.0, "OPP_FG3M": 13.5}
     avg = league_avg.get(opp_col, 1.0)
     opp_val = float(opp_stats[opp_col])
-    if avg == 0:
-        return 1.0
-    return opp_val / avg
+    return opp_val / avg if avg > 0 else 1.0
 
 
 def _empty_result(stat: str) -> dict:
     return {
-        "stat": stat,
-        "stat_label": PROP_CATEGORIES.get(stat, stat),
-        "line": 0.0,
-        "projection": 0.0,
-        "over_prob": 0.5,
-        "under_prob": 0.5,
-        "season_avg": 0.0,
-        "recent_avg": 0.0,
-        "std_dev": 0.0,
-        "hit_rate_over": 0.5,
-        "games_played": 0,
+        "stat": stat, "stat_label": PROP_CATEGORIES.get(stat, stat),
+        "our_line": 0.0, "line": 0.0, "book_line": None, "target_line": 0.0,
+        "projection": 0.0, "std_dev": 0.0,
+        "over_prob": 0.5, "under_prob": 0.5,
+        "season_avg": 0.0, "recent_avg": 0.0,
+        "hit_rate_over": 0.5, "hit_rate_over_book": 0.5,
+        "games_played": 0, "calibration_scale": 1.0,
     }
 
 
@@ -164,16 +180,26 @@ def all_props_for_player(
     game_pace: float = 100.0,
     league_avg_pace: float = 100.0,
     categories: list[str] | None = None,
+    book_props: dict | None = None,
 ) -> list[dict]:
+    """
+    Generate props for all categories. If book_props provided ({stat: {line, ...}}),
+    uses book lines for probability calculations so unders surface correctly.
+    """
     if categories is None:
         categories = list(PROP_CATEGORIES.keys())
     results = []
     for stat in categories:
+        bk_line = None
+        if book_props and stat in book_props and book_props[stat].get("line"):
+            bk_line = float(book_props[stat]["line"])
+
         result = player_prop_line(
-            player_game_log, stat, opponent_stats, game_pace, league_avg_pace
+            player_game_log, stat, opponent_stats, game_pace, league_avg_pace,
+            book_line=bk_line,
         )
         if result["games_played"] > 0:
-            result["ml_over"] = prob_to_moneyline(result["over_prob"])
+            result["ml_over"]  = prob_to_moneyline(result["over_prob"])
             result["ml_under"] = prob_to_moneyline(result["under_prob"])
             results.append(result)
     return results

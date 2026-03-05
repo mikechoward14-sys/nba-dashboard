@@ -177,7 +177,9 @@ def scan_prop_bets(sportsbook_props: dict, season: str) -> list[dict]:
         if game_log.empty:
             continue
 
-        our_props = all_props_for_player(game_log, categories=list(stat_props.keys()))
+        # Pass book props so probs are calculated against book lines
+        our_props = all_props_for_player(game_log, categories=list(stat_props.keys()),
+                                          book_props=stat_props)
 
         for our_prop in our_props:
             stat = our_prop["stat"]

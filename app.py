@@ -2,6 +2,8 @@
 NBA Betting Lines Dashboard — Entry Point
 Run with: streamlit run app.py
 """
+from dotenv import load_dotenv
+load_dotenv()
 import streamlit as st
 
 st.set_page_config(
@@ -43,6 +45,7 @@ page = st.sidebar.radio(
         "🔮 Game Analyzer",
         "👤 Player Props",
         "💰 Value Bets & Parlays",
+        "📉 Model Performance",
         "📊 Team Stats",
         "📈 Line Comparison",
     ],
@@ -68,6 +71,9 @@ elif page == "👤 Player Props":
     render(season)
 elif page == "💰 Value Bets & Parlays":
     from pages.value_bets import render
+    render(season)
+elif page == "📉 Model Performance":
+    from pages.model_performance import render
     render(season)
 elif page == "📊 Team Stats":
     from pages.team_stats import render

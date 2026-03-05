@@ -15,7 +15,9 @@ from data.fetcher import (
 from models.player_props import all_props_for_player, PROP_CATEGORIES
 from utils.formatting import fmt_moneyline, hit_rate_label
 from data.odds_fetcher import get_all_player_props, find_player_props
+from data.tracker import record_prediction
 from utils.line_display import prop_line_comparison, prop_table_header, odds_api_key_widget
+from datetime import datetime
 
 
 @st.cache_data(ttl=3600)
@@ -108,21 +110,41 @@ def render(season: str):
                     game_pace = float(team_adv[opp_adv_mask].iloc[0].get("PACE", 100))
                     league_avg_pace = float(team_adv["PACE"].mean()) if "PACE" in team_adv else 100.0
 
-    # ── Generate props ────────────────────────────────────────────────────────
+    # Match sportsbook props for this player first (needed by model)
+    player_book_props = find_player_props(sportsbook_props, player_name) if sportsbook_props else {}
+
+    # ── Generate props (book lines passed in so probs are vs book line) ───────
     props = all_props_for_player(
         game_log,
         opponent_stats=opp_stats_row,
         game_pace=game_pace,
         league_avg_pace=league_avg_pace,
         categories=selected_cats,
+        book_props=player_book_props,
     )
 
     if not props:
         st.warning("Could not generate props — missing stat columns in game log.")
         return
 
-    # Match sportsbook props for this player
-    player_book_props = find_player_props(sportsbook_props, player_name) if sportsbook_props else {}
+    # ── Record predictions for tracking ──────────────────────────────────────
+    today = datetime.now().strftime("%Y-%m-%d")
+    for prop in props:
+        if prop["games_played"] > 0:
+            try:
+                record_prediction(
+                    player_name=player_name,
+                    player_id=player_id,
+                    stat=prop["stat"],
+                    our_line=prop["our_line"],
+                    book_line=prop.get("book_line"),
+                    projection=prop["projection"],
+                    over_prob=prop["over_prob"],
+                    under_prob=prop["under_prob"],
+                    game_date=today,
+                )
+            except Exception:
+                pass
 
     # ── Side-by-side props table ──────────────────────────────────────────────
     st.markdown(f"### {player_name} — Our Lines vs Sportsbook")
