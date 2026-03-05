@@ -42,6 +42,7 @@ page = st.sidebar.radio(
         "🏠 Today's Games",
         "🔮 Game Analyzer",
         "👤 Player Props",
+        "💰 Value Bets & Parlays",
         "📊 Team Stats",
         "📈 Line Comparison",
     ],
@@ -64,6 +65,9 @@ elif page == "🔮 Game Analyzer":
     render(season)
 elif page == "👤 Player Props":
     from pages.player_props import render
+    render(season)
+elif page == "💰 Value Bets & Parlays":
+    from pages.value_bets import render
     render(season)
 elif page == "📊 Team Stats":
     from pages.team_stats import render

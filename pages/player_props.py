@@ -14,6 +14,8 @@ from data.fetcher import (
 )
 from models.player_props import all_props_for_player, PROP_CATEGORIES
 from utils.formatting import fmt_moneyline, hit_rate_label
+from data.odds_fetcher import get_all_player_props, find_player_props
+from utils.line_display import prop_line_comparison, prop_table_header, odds_api_key_widget
 
 
 @st.cache_data(ttl=3600)
@@ -31,10 +33,18 @@ def render(season: str):
     st.title("👤 Player Props")
     st.caption("Generate over/under lines and probabilities for any NBA player.")
 
+    api_key = odds_api_key_widget()
+
     with st.spinner("Loading player list..."):
         players_df = load_player_list()
     with st.spinner("Loading team stats..."):
         team_stats, team_adv = load_team_data(season)
+
+    # Fetch all sportsbook player props upfront
+    sportsbook_props: dict = {}
+    if api_key:
+        with st.spinner("Fetching sportsbook player props..."):
+            sportsbook_props = get_all_player_props(api_key)
 
     all_teams = get_all_teams()
 
@@ -111,66 +121,64 @@ def render(season: str):
         st.warning("Could not generate props — missing stat columns in game log.")
         return
 
-    # ── Summary table ─────────────────────────────────────────────────────────
-    st.markdown(f"### {player_name} — Projected Lines")
+    # Match sportsbook props for this player
+    player_book_props = find_player_props(sportsbook_props, player_name) if sportsbook_props else {}
+
+    # ── Side-by-side props table ──────────────────────────────────────────────
+    st.markdown(f"### {player_name} — Our Lines vs Sportsbook")
     if opp_name != "None (season avg)":
         st.caption(f"Matchup-adjusted vs {opp_name}")
 
-    rows = []
-    for p in props:
-        rows.append({
-            "Stat": p["stat_label"],
-            "Line": p["line"],
-            "Projection": p["projection"],
-            "Season Avg": p["season_avg"],
-            f"Last {last_n} Avg": p["recent_avg"],
-            "Over Prob": f"{p['over_prob']*100:.1f}%",
-            "Under Prob": f"{p['under_prob']*100:.1f}%",
-            "Over ML": fmt_moneyline(p.get("ml_over", 0)),
-            "Under ML": fmt_moneyline(p.get("ml_under", 0)),
-            "Hit Rate (over)": hit_rate_label(p["hit_rate_over"]),
-        })
-
-    df_props = pd.DataFrame(rows)
-    st.dataframe(df_props, use_container_width=True, hide_index=True)
-
-    # ── Per-stat detail cards ─────────────────────────────────────────────────
-    st.markdown("### Detailed Breakdown")
-
+    prop_table_header()
     for prop in props:
-        with st.expander(f"{prop['stat_label']} — Line: {prop['line']}"):
+        book_data = player_book_props.get(prop["stat"])
+        prop_line_comparison(
+            stat_label=prop["stat_label"],
+            our_line=prop["line"],
+            our_proj=prop["projection"],
+            our_over_ml=prop.get("ml_over", 0),
+            our_under_ml=prop.get("ml_under", 0),
+            our_hit_rate=prop["hit_rate_over"],
+            book_data=book_data,
+        )
+
+    # ── Per-stat detail charts ────────────────────────────────────────────────
+    st.markdown("### Game Log Charts")
+    for prop in props:
+        bk = player_book_props.get(prop["stat"])
+        bk_line = bk["line"] if bk else None
+        expander_label = f"{prop['stat_label']} — Ours: {prop['line']}"
+        if bk_line:
+            expander_label += f"  |  Book: {bk_line:.1f}"
+        with st.expander(expander_label):
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Line", prop["line"])
-            c2.metric("Projection", prop["projection"])
-            c3.metric("Over ML", fmt_moneyline(prop.get("ml_over", 0)))
-            c4.metric("Under ML", fmt_moneyline(prop.get("ml_under", 0)))
+            c1.metric("Our Line", prop["line"])
+            c2.metric("Book Line", f"{bk_line:.1f}" if bk_line else "—")
+            c3.metric("Projection", prop["projection"])
+            c4.metric("Hist Over %", hit_rate_label(prop["hit_rate_over"]))
 
             c5, c6, c7, c8 = st.columns(4)
             c5.metric("Season Avg", prop["season_avg"])
             c6.metric(f"Last {last_n} Avg", prop["recent_avg"])
-            c7.metric("Std Dev", prop["std_dev"])
-            c8.metric("Historical Over %", hit_rate_label(prop["hit_rate_over"]))
+            c7.metric("Our Over ML", fmt_moneyline(prop.get("ml_over", 0)))
+            c8.metric("Book Over ML", fmt_moneyline(bk["over_ml"]) if bk and bk.get("over_ml") else "—")
 
-            # Rolling performance chart
             stat_col = prop["stat"]
             if stat_col in game_log.columns:
                 series = pd.to_numeric(game_log[stat_col], errors="coerce").dropna()
+                display_line = bk_line if bk_line else prop["line"]
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
                     x=list(range(1, len(series) + 1)),
                     y=series.values,
-                    marker_color=[
-                        "#2ecc71" if v > prop["line"] else "#e74c3c"
-                        for v in series.values
-                    ],
+                    marker_color=["#2ecc71" if v > display_line else "#e74c3c" for v in series.values],
                     name=prop["stat_label"],
                 ))
-                fig.add_hline(
-                    y=prop["line"],
-                    line_dash="dash",
-                    line_color="gold",
-                    annotation_text=f"Line: {prop['line']}",
-                )
+                fig.add_hline(y=prop["line"], line_dash="dash", line_color="gold",
+                              annotation_text=f"Our: {prop['line']}")
+                if bk_line and bk_line != prop["line"]:
+                    fig.add_hline(y=bk_line, line_dash="dot", line_color="#3498db",
+                                  annotation_text=f"Book: {bk_line:.1f}")
                 fig.update_layout(
                     title=f"Last {len(series)} Games — {prop['stat_label']}",
                     xaxis_title="Game (most recent first)",

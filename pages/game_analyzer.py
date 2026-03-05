@@ -17,6 +17,8 @@ from data.fetcher import (
 from models.elo import compute_elo_ratings, win_probability, prob_to_moneyline
 from models.spread import expected_margin
 from utils.formatting import fmt_moneyline, fmt_spread, spread_display
+from data.odds_fetcher import get_game_odds, parse_game_odds, find_game_odds
+from utils.line_display import game_lines_comparison, odds_api_key_widget
 
 
 @st.cache_data(ttl=3600)
@@ -31,6 +33,8 @@ def load_season_data(season: str):
 def render(season: str):
     st.title("🔮 Game Analyzer")
     st.caption("Select any two teams for a detailed matchup breakdown and projected lines.")
+
+    api_key = odds_api_key_widget()
 
     all_teams = get_all_teams()
     team_names = sorted(all_teams["full_name"].tolist())
@@ -86,16 +90,37 @@ def render(season: str):
     spread_val = spread_result["spread_line"]
     home_spread_str, away_spread_str = spread_display(spread_val)
 
+    # ── Fetch sportsbook lines ────────────────────────────────────────────────
+    book_lines = None
+    if api_key:
+        with st.spinner("Fetching sportsbook odds..."):
+            raw_odds = get_game_odds(api_key)
+            if raw_odds and not (isinstance(raw_odds[0], dict) and "error" in raw_odds[0]):
+                market_lines = parse_game_odds(raw_odds)
+                book_lines = find_game_odds(market_lines, home_name, away_name)
+
     # ── Header summary ────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown(f"## {away_name}  **@**  {home_name}")
 
+    # Win prob metrics row
     c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Home ML", fmt_moneyline(home_ml), f"{home_wp*100:.1f}% win prob")
-    c2.metric("Away ML", fmt_moneyline(away_ml), f"{away_wp*100:.1f}% win prob")
-    c3.metric("Spread (Home)", home_spread_str)
-    c4.metric("Spread (Away)", away_spread_str)
-    c5.metric("Total O/U", f"{spread_result['total']:.1f}")
+    c1.metric("Home Win Prob", f"{home_wp*100:.1f}%")
+    c2.metric("Away Win Prob", f"{away_wp*100:.1f}%")
+    c3.metric("Elo (Home)", f"{home_elo:.0f}")
+    c4.metric("Elo (Away)", f"{away_elo:.0f}")
+    c5.metric("Implied Total", f"{spread_result['total']:.1f}")
+
+    st.markdown("### Lines: Our Model vs Sportsbook")
+    game_lines_comparison(
+        home_name=home_name,
+        away_name=away_name,
+        our_home_ml=home_ml,
+        our_away_ml=away_ml,
+        our_spread=spread_val,
+        our_total=spread_result["total"],
+        book_lines=book_lines,
+    )
 
     # ── Win probability gauge ─────────────────────────────────────────────────
     st.markdown("### Win Probability")
