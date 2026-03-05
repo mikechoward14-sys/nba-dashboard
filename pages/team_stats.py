@@ -6,8 +6,7 @@ import pandas as pd
 import plotly.express as px
 
 from data.fetcher import (
-    get_team_season_stats,
-    get_team_advanced_stats,
+    get_all_team_stats_merged,
     get_season_games,
     get_all_teams,
 )
@@ -16,8 +15,8 @@ from models.elo import compute_elo_ratings
 
 @st.cache_data(ttl=3600)
 def load_all_stats(season: str):
-    basic = get_team_season_stats(season)
-    adv = get_team_advanced_stats(season)
+    basic = get_all_team_stats_merged(season)
+    adv = basic  # already merged
     season_games = get_season_games(season)
     elo = compute_elo_ratings(season_games)
     return basic, adv, elo

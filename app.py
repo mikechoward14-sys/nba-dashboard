@@ -50,7 +50,7 @@ page = st.sidebar.radio(
 st.sidebar.markdown("---")
 season = st.sidebar.selectbox(
     "Season",
-    ["2024-25", "2023-24", "2022-23"],
+    ["2025-26", "2024-25", "2023-24", "2022-23"],
     index=0,
 )
 st.sidebar.caption("Data via NBA.com (nba_api)")
